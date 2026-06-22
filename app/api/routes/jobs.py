@@ -1,3 +1,4 @@
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -23,6 +24,41 @@ from app.services.csv_validator import CSVValidationError, validate_csv_headers
 from app.tasks.process_job import process_job
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+def _compute_llm_status(db: Session, job_id: str, llm_raw_response: str | None) -> str:
+    """Derive LLM run status from persisted transaction data.
+
+    Returns:
+        'ok'       - LLM ran and classified at least one transaction successfully.
+        'partial'  - LLM ran but some individual transactions still failed.
+        'fallback' - LLM never ran (no API key or all calls failed).
+    """
+    from sqlalchemy import func
+
+    total_needing_llm = db.scalar(
+        select(func.count()).where(
+            Transaction.job_id == job_id,
+            Transaction.llm_failed == True,  # noqa: E712
+        )
+    ) or 0
+
+    total_llm_succeeded = db.scalar(
+        select(func.count()).where(
+            Transaction.job_id == job_id,
+            Transaction.llm_category.isnot(None),
+        )
+    ) or 0
+
+    # llm_raw_response on the summary is None only when the LLM summary call itself failed
+    summary_llm_ran = llm_raw_response is not None
+
+    if total_llm_succeeded == 0 and not summary_llm_ran:
+        return "fallback"
+    if total_needing_llm > 0:
+        return "partial"
+    return "ok"
+
 
 
 @router.post("/upload", response_model=UploadResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -53,6 +89,25 @@ def upload_job(file: UploadFile = File(...), db: Session = Depends(get_db)) -> U
     db.commit()
 
     process_job.delay(job.id)
+
+    # HuggingFace Spaces / single-container envs: no Redis or Celery worker available.
+    # CELERY_SYNC_MODE=true bypasses Celery and runs the job synchronously in-process.
+    # The API response is still 202 for interface compatibility, but by the time the
+    # client polls /status the job will already be processing or completed.
+    if os.getenv("CELERY_SYNC_MODE", "").lower() == "true":
+        import threading
+        from app.tasks.process_job import _process_job
+        from app.core.database import SessionLocal
+
+        def _run_sync(job_id: str) -> None:
+            db = SessionLocal()
+            try:
+                _process_job(db, job_id)
+            finally:
+                db.close()
+
+        threading.Thread(target=_run_sync, args=(job.id,), daemon=True).start()
+
     return UploadResponse(job_id=job.id, status=job.status)
 
 
@@ -86,6 +141,11 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)) -> JobStatusRespo
             risk_level=job.summary.risk_level,
         )
 
+    # Determine LLM status once the job is complete
+    llm_status: str | None = None
+    if job.status == JobStatus.completed and job.summary:
+        llm_status = _compute_llm_status(db, job.id, job.summary.llm_raw_response)
+
     return JobStatusResponse(
         id=job.id,
         filename=job.filename,
@@ -94,7 +154,9 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)) -> JobStatusRespo
         completed_at=job.completed_at,
         error_message=job.error_message,
         summary=summary,
+        llm_status=llm_status,
     )
+
 
 
 @router.get("/{job_id}/results", response_model=JobResultsResponse)
@@ -132,6 +194,8 @@ def get_job_results(
         if transaction.is_anomaly
     ]
 
+    llm_status = _compute_llm_status(db, job.id, job.summary.llm_raw_response)
+
     return JobResultsResponse(
         job_id=job.id,
         cleaned_transactions=[TransactionOut.model_validate(transaction) for transaction in transactions],
@@ -145,5 +209,7 @@ def get_job_results(
             narrative=job.summary.narrative,
             risk_level=job.summary.risk_level,
         ),
+        llm_status=llm_status,
     )
+
 

@@ -39,6 +39,11 @@ class JobStatusResponse(BaseModel):
     completed_at: datetime | None
     error_message: str | None = None
     summary: JobSummaryBrief | None = None
+    llm_status: str | None = Field(
+        default=None,
+        description="'ok' = LLM ran successfully, 'partial' = some rows failed, 'fallback' = no API key or all LLM calls failed",
+    )
+
 
 
 class TransactionOut(BaseModel):
@@ -85,3 +90,7 @@ class JobResultsResponse(BaseModel):
     flagged_anomalies: list[AnomalyOut]
     per_category_spend: dict[str, str]
     llm_summary: FullSummaryOut
+    llm_status: str = Field(
+        description="'ok' = LLM ran successfully, 'partial' = some rows failed, 'fallback' = no API key or all LLM calls failed",
+    )
+
