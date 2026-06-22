@@ -10,7 +10,14 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    pool_size=10,       # base persistent connections (was: 5 default)
+    max_overflow=20,    # burst connections on top of pool_size (was: 10 default)
+    pool_timeout=30,    # seconds to wait for a connection before raising
+    pool_recycle=1800,  # recycle connections after 30 min to avoid stale handles
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 

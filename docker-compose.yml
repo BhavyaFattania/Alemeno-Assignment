@@ -61,6 +61,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    # maxmemory: prevents Redis OOM from accumulating Celery results
+    # allkeys-lru: evicts least-recently-used keys when memory is full
+    #              (protects broker queue from being evicted by using LRU on results)
+    # appendonly yes: AOF persistence — queued tasks survive a Redis restart
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes
     ports:
       - "6379:6379"
 

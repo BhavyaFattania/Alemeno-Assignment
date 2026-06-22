@@ -13,19 +13,24 @@ def build_summary(transactions: list[CleanedTransaction], client: LLMClient | No
         summary = fallback_summary(transactions)
         raw_response = None
 
+    # Compute fallback ONCE and reuse — was previously called up to 3 times,
+    # each re-iterating the full transactions list unnecessarily
+    _fallback = fallback_summary(transactions)
+
     summary.setdefault("total_spend_by_currency", aggregation_service.total_spend_by_currency(transactions))
     summary.setdefault("top_merchants", aggregation_service.top_merchants(transactions))
     summary.setdefault("anomaly_count", aggregation_service.anomaly_count(transactions))
-    summary.setdefault("narrative", fallback_summary(transactions)["narrative"])
-    summary.setdefault("risk_level", fallback_summary(transactions)["risk_level"])
+    summary.setdefault("narrative", _fallback["narrative"])
+    summary.setdefault("risk_level", _fallback["risk_level"])
     summary["spend_by_category"] = aggregation_service.spend_by_category(transactions)
     summary["total_spend_by_currency"] = _string_dict(summary["total_spend_by_currency"])
     summary["spend_by_category"] = _string_dict(summary["spend_by_category"])
 
     if summary["risk_level"] not in {"low", "medium", "high"}:
-        summary["risk_level"] = fallback_summary(transactions)["risk_level"]
+        summary["risk_level"] = _fallback["risk_level"]
 
     return summary, raw_response
+
 
 
 def _string_dict(payload: Any) -> dict[str, str]:

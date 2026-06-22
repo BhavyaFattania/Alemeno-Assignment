@@ -26,6 +26,22 @@ class LLMClient:
         self.api_key = api_key or settings.openrouter_api_key
         self.model = model or settings.openrouter_model
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+        # Shared client reuses TCP connections across calls (keep-alive)
+        # instead of creating a new socket on every request/retry
+        self._http_client = httpx.Client(
+            timeout=settings.llm_timeout_seconds,
+            limits=httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=5,
+            ),
+        )
+
+    def __del__(self) -> None:
+        """Close the shared HTTP client when the LLMClient is garbage collected."""
+        try:
+            self._http_client.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def classify_transactions(self, transactions: list[CleanedTransaction]) -> tuple[dict[int, str], str]:
         if not transactions:
@@ -96,16 +112,17 @@ class LLMClient:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                with httpx.Client(timeout=settings.llm_timeout_seconds) as client:
-                    response = client.post(self.base_url, headers=headers, json=body)
-                    response.raise_for_status()
-                    content = response.json()["choices"][0]["message"]["content"]
-                    return json.loads(_extract_json(content))
+                # Reuse self._http_client — no new TCP handshake per retry
+                response = self._http_client.post(self.base_url, headers=headers, json=body)
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"]
+                return json.loads(_extract_json(content))
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if attempt < 2:
                     time.sleep(2**attempt)
         raise RuntimeError(f"LLM call failed after retries: {last_error}") from last_error
+
 
 
 def _extract_json(content: str) -> str:

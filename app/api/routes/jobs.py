@@ -57,11 +57,17 @@ def upload_job(file: UploadFile = File(...), db: Session = Depends(get_db)) -> U
 
 
 @router.get("", response_model=list[JobListItem])
-def list_jobs(status_filter: JobStatus | None = Query(default=None, alias="status"), db: Session = Depends(get_db)) -> list[Job]:
-    stmt = select(Job).order_by(Job.created_at.desc())
+def list_jobs(
+    status_filter: JobStatus | None = Query(default=None, alias="status"),
+    skip: int = Query(default=0, ge=0, description="Number of records to skip"),
+    limit: int = Query(default=50, ge=1, le=200, description="Max records to return"),
+    db: Session = Depends(get_db),
+) -> list[Job]:
+    stmt = select(Job).order_by(Job.created_at.desc()).offset(skip).limit(limit)
     if status_filter:
         stmt = stmt.where(Job.status == status_filter)
     return list(db.scalars(stmt).all())
+
 
 
 @router.get("/{job_id}/status", response_model=JobStatusResponse)
@@ -92,14 +98,27 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)) -> JobStatusRespo
 
 
 @router.get("/{job_id}/results", response_model=JobResultsResponse)
-def get_job_results(job_id: str, db: Session = Depends(get_db)) -> JobResultsResponse:
+def get_job_results(
+    job_id: str,
+    skip: int = Query(default=0, ge=0, description="Number of transactions to skip"),
+    limit: int = Query(default=100, ge=1, le=1000, description="Max transactions to return"),
+    db: Session = Depends(get_db),
+) -> JobResultsResponse:
     job = db.scalar(select(Job).options(joinedload(Job.summary)).where(Job.id == job_id))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status != JobStatus.completed or not job.summary:
         raise HTTPException(status_code=409, detail="Job results are not ready")
 
-    transactions = list(db.scalars(select(Transaction).where(Transaction.job_id == job.id).order_by(Transaction.id)).all())
+    transactions = list(
+        db.scalars(
+            select(Transaction)
+            .where(Transaction.job_id == job.id)
+            .order_by(Transaction.id)
+            .offset(skip)
+            .limit(limit)
+        ).all()
+    )
     anomalies = [
         AnomalyOut(
             txn_id=transaction.txn_id,
@@ -127,3 +146,4 @@ def get_job_results(job_id: str, db: Session = Depends(get_db)) -> JobResultsRes
             risk_level=job.summary.risk_level,
         ),
     )
+
